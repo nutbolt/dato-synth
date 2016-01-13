@@ -1,9 +1,9 @@
 // 
 // TODO: 
-// - Sequencer pin definitions need to be changed
 // - Remove delay glitching when delay time is changed
-// - Add delay feedback path and feedback button
-// - Make filter envelope pot work on both release and attack
+//   1. Switch the delay tap to use and set the delay time to the pot's value
+//   2. Use a mixer to fade between the two taps
+//   X. create a new clocked delay effect
 //
 #include <Audio.h>
 #include <Wire.h>
@@ -13,7 +13,6 @@
 #include <FastLED.h>
 #include <Keypad.h>
 #include "midinotes.h"
-
 
 // #define USB_MIDI
 #if USB_MIDI
@@ -51,34 +50,28 @@ AudioConnection          patchCord13(mixer2, dac1);
 // GUItool: end automatically generated code
 
 // LED strip
-const int LED_DT = 4;            // Data pin to connect to the strip.
+#define LED_DT 11          // Data pin to connect to the strip. Would like this to be pin 17
 #define COLOR_ORDER GRB          // It's GRB for WS2812B
 #define LED_TYPE WS2812          // (WS2801, WS2812B or APA102)
-const int NUM_LEDS = 8;          // Number of LED's.
+#define NUM_LEDS  8          // Number of LED's.
 struct CRGB leds[NUM_LEDS];      // Initialize our LED array.
 const int LED_BRIGHTNESS = 128;
 
 // Pin assignment
 const int DELAY_TIME_POT = A0;
 const int AMP_ENV_POT = A1;
-const int FILTER_ENV_POT = A3;
 const int FILTER_RES_POT = A2;
+const int FILTER_ENV_POT = A3;
 const int FILTER_FREQ_POT = A4;
 const int OSC_DETUNE_POT = A5;
-const int BITCRUSH_PIN_0 = 12;
-const int BITCRUSH_PIN_1 = 11;
-const int FEEDBACK_PIN = 10;
+const int TEMPO_POT = A9; 
 const int LED_PIN = 13;
-// Pins
-const int TEMPO_PIN = A3; // Actually A9 but now doubled up with the filter env pot
-const int SYNC_PIN = 5; // NC
-
 
 // Key matrix
-const byte ROWS = 5;
+const byte ROWS = 7;
 const byte COLS = 4; 
-byte row_pins[ROWS] = {20,3,22,21,2}; //connect to the row pinouts of the keypad
-byte col_pins[COLS] = {6,7,8,9}; //connect to the column pinouts of the keypad
+byte row_pins[ROWS] = {9,4,10,12,2,21,22}; //connect to the row pinouts of the keypad
+byte col_pins[COLS] = {5,6,7,8}; //connect to the column pinouts of the keypad
 
 // Key matrix char definitions
 const char DUMMY_KEY = 126;
@@ -105,6 +98,16 @@ const char STEP_7 = 104;
 const char OCT_DOWN = 30;
 const char OCT_UP = 31;
 const char DBL_SPEED = 32;
+const char SEQ_RANDOM = 33;
+
+const char BITC_0 = 34;
+const char BITC_1 = 35;
+const char FX_0   = 36;
+const char OSC1_PULSE = 37;
+const char MIC_2 = 38;
+const char OSC1_SAW = 39;
+const char OSC2_PULSE = 40;
+const char MIC_1 = 41;
 
 // Key matrix hookup
 char keys[ROWS][COLS] = {
@@ -112,7 +115,9 @@ char keys[ROWS][COLS] = {
   { KEYB_4, KEYB_5, KEYB_6, KEYB_7 },
   { STEP_0, STEP_1, STEP_2, STEP_3 },
   { STEP_4, STEP_5, STEP_6, STEP_7 },
-  { OCT_UP, DBL_SPEED, DUMMY_KEY, OCT_DOWN }
+  { OCT_DOWN, DBL_SPEED, SEQ_RANDOM, OCT_UP },
+  { BITC_0, BITC_1, FX_0,  OSC1_PULSE },
+  { MIC_2, OSC1_SAW, OSC2_PULSE, MIC_1 }
 };
 Keypad keypad = Keypad( makeKeymap(keys), row_pins, col_pins, ROWS, COLS );
 
@@ -131,7 +136,6 @@ unsigned int tempo = 0;
 unsigned long next_step_time = 0;
 unsigned long gate_off_time = 0;
 unsigned long sync_off_time = 0;
-
 
 // Note to colour mapping
 const CRGB COLOURS[] = {
@@ -155,10 +159,9 @@ static boolean sequencer_is_running = true;
 // Musical settings
 //const int BLACK_KEYS[] = {22,25,27,30,32,34,37,39,42,44,46,49,51,54,56,58,61,63,66,68,73,75,78,80};
 const int SCALE[] = { 46,49,51,54,61,63,66,68 }; // Low with 2 note split
-const float SAMPLERATE_STEPS[] = { 1109,2489,4435,44100 }; 
+const float SAMPLERATE_STEPS[] = { 44100,4435,2489,1109 }; 
 const char DETUNE_OFFSET_SEMITONES[] = { 3,4,5,7,9 };
-const int MAX_DELAY_TIME_MSEC = 300;
-
+const int MAX_DELAY_TIME_MSEC = 200;
 
 // Variable declarations
 int detune_amount = 0;
@@ -168,10 +171,15 @@ int resonance;
 int filter_env_pot_value;
 int amp_env_release;
 boolean note_is_playing = false;
+boolean double_speed = false;
+int transpose = 0;
+char bitcrusher_button0_pressed = 0;
+char bitcrusher_button1_pressed = 0;
+boolean next_step_is_random = false;
 
 void setup() {
-  Serial.begin(115200);
-  AudioMemory(100); // 260 bytes per block, 2.9ms per block
+
+  AudioMemory(180); // 260 bytes per block, 2.9ms per block
 
   dc1.amplitude(1.0); // Filter env - this is going to be related to velocity
 
@@ -215,6 +223,14 @@ void setup() {
     delay1.disable(i); // disable unused delay outputs
   }
 
+  FastLED.addLeds<LED_TYPE, LED_DT, COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.setBrightness(LED_BRIGHTNESS); 
+  FastLED.clear();
+  leds[7] = CRGB::Blue;
+  FastLED.show();
+  
+  keypad.setDebounceTime(5);
+
   #if USB_MIDI
     usbMIDI.setHandleNoteOff(midi_note_off);
     usbMIDI.setHandleNoteOn(midi_note_on) ;
@@ -224,65 +240,61 @@ void setup() {
     MIDI.begin(MIDI_CHANNEL);
   #endif
 
-  pinMode(BITCRUSH_PIN_1, INPUT_PULLUP);
-  pinMode(BITCRUSH_PIN_0, INPUT_PULLUP);
-  pinMode(FEEDBACK_PIN, INPUT_PULLUP);
-
   pinMode(LED_PIN, OUTPUT);
-  delay(1000);
-
 }
 
 void loop() {
-  // Loop through the steps of the sequencer
-  for (int s = 0; s < 8; s++) {
-    
-    current_step = s;
 
-    // Decrement the velocity of the current note. If minimum velocity is reached leave it there
-    if (step_velocity[current_step] <= VELOCITY_STEP) { /*step_velocity[current_step] = 0; step_enable[current_step] = 0;*/ }
-    else{step_velocity[current_step] -= VELOCITY_STEP;}
+  // Decrement the velocity of the current note. If minimum velocity is reached leave it there
+  if (step_velocity[current_step] <= VELOCITY_STEP) { /*step_velocity[current_step] = 0; step_enable[current_step] = 0;*/ }
+  else { step_velocity[current_step] -= VELOCITY_STEP; }
 
-    handle_leds();
+  // digitalWrite(SYNC_PIN, HIGH); // Volca sync on
 
-    digitalWrite(SYNC_PIN, HIGH); // Volca sync on
+  if (step_enable[current_step]) {
+    // MIDI.sendNoteOn(SCALE[step_note[current_step]], step_velocity[current_step], MIDI_CHANNEL);
+    note_on(SCALE[step_note[current_step]]+transpose, step_velocity[current_step]);
+  } 
+  
+  handle_input_until(sync_off_time);
 
-    sync_off_time = millis() + SYNC_LENGTH_MSEC;
-    
-    if (step_enable[current_step]) {
-      // MIDI.sendNoteOn(SCALE[step_note[current_step]], step_velocity[current_step], MIDI_CHANNEL);
-      note_on(SCALE[step_note[current_step]], step_velocity[current_step]);
-    }
-    gate_off_time = millis() + GATE_LENGTH_MSEC;
+  // digitalWrite(SYNC_PIN, LOW); // Volca sync off
 
-    wait(sync_off_time);
+  handle_input_until(gate_off_time);
 
-    digitalWrite(SYNC_PIN, LOW); // Volca sync off
+  // MIDI.sendNoteOff(SCALE[step_note[current_step]], 64, MIDI_CHANNEL);
+  note_off();
 
-    wait(gate_off_time);
-
-    // MIDI.sendNoteOff(SCALE[step_note[current_step]], 64, MIDI_CHANNEL);
-    note_off();
-
-    next_step_time = millis() + get_tempo_msec();
-
-    // Very crude sequencer off implementation
-    while (get_tempo_msec() >= MIN_TEMPO_MSEC) {
-      sequencer_is_running = false;
-      wait(millis() + 20);
-      tempo = get_tempo_msec();
-    }
-    sequencer_is_running = true;
-
-    // Advance the step number already, so any pressed keys end up in the next step
-    if (s == 7) current_step = 0;
-    else current_step++;
-
-    wait(next_step_time);
+  // Very crude sequencer off implementation
+  while (tempo_interval_msec() >= MIN_TEMPO_MSEC) {
+    sequencer_is_running = false;
+    handle_input_until(millis() + 20);
+    tempo = tempo_interval_msec();
   }
+  sequencer_is_running = true;
+
+  if(!double_speed) {
+    next_step_time = millis() + tempo_interval_msec();
+  } else {
+    next_step_time = millis() + (tempo_interval_msec()/2);
+  }
+  
+  sync_off_time = next_step_time + SYNC_LENGTH_MSEC;
+  gate_off_time = next_step_time + GATE_LENGTH_MSEC;
+
+  // Advance the step number already, so any pressed keys end up in the next step
+  if (!next_step_is_random) {
+    current_step++;
+    if (current_step >= NUM_STEPS) current_step = 0;
+  } else {
+    current_step = random(NUM_STEPS);
+  }
+ 
+  handle_input_until(next_step_time);
+
 }
 
-void read_pots(){
+void read_pots() {
   AudioNoInterrupts();
 
   detune_amount = analogRead(OSC_DETUNE_POT);
@@ -300,17 +312,17 @@ void read_pots(){
   filter_env_pot_value = 512;//analogRead(FILTER_ENV_POT);
   envelope2.release(amp_env_release * 0.5);
 
-  delay1.delay(0,map(analogRead(DELAY_TIME_POT),0,1023,50,MAX_DELAY_TIME_MSEC));
+  delay1.delay(0, map(analogRead(DELAY_TIME_POT)/16,0,64,50,MAX_DELAY_TIME_MSEC));
   mixer2.gain(1, analogRead(DELAY_TIME_POT) * 0.0002);
   // TODO: smooth out delay time changes to prevent glitches
 
-  bitcrusher1.sampleRate(SAMPLERATE_STEPS[(digitalRead(BITCRUSH_PIN_1) << 1) +  digitalRead(BITCRUSH_PIN_0)]);
+  bitcrusher1.sampleRate(SAMPLERATE_STEPS[(bitcrusher_button1_pressed << 1) + bitcrusher_button0_pressed]);
 
-  if(digitalRead(FEEDBACK_PIN)) {
-    mixer3.gain(1, 0.4); // delay feedback
-  } else {
-    mixer3.gain(1, 0.9);
-  }
+  // if(digitalRead(FEEDBACK_PIN)) {
+  mixer3.gain(1, 0.4); // delay feedback
+  // } else {
+  //   mixer3.gain(1, 0.9);
+  // }
 
   AudioInterrupts(); 
 }
@@ -325,6 +337,8 @@ void midi_note_off(byte channel, byte note, byte velocity) {
 
 void note_on(byte midi_note, byte velocity) {
 
+  digitalWrite(LED_PIN, HIGH);
+
   AudioNoInterrupts();
 
   dc1.amplitude(velocity / 127.); // DC amplitude controls filter env amount
@@ -335,17 +349,19 @@ void note_on(byte midi_note, byte velocity) {
   waveform2.frequency(detune(osc1_midi_note,detune_amount));
 
   AudioInterrupts(); 
+
   note_is_playing = true;
   envelope1.noteOn();
   envelope2.noteOn();
 }
 
 void note_off() {
-  //if (!note_is_playing) {
+  if (note_is_playing) {
     envelope1.noteOff();
     envelope2.noteOff();
     note_is_playing = false;
-  //}
+  }
+  digitalWrite(LED_PIN, LOW);
 }
 
 float midi_note_to_frequency(int x) {
@@ -363,17 +379,16 @@ int detune(int note, int amount) { // amount goes from 0-1023
   }
 }
 
-void wait(unsigned long until) {
+void handle_input_until(unsigned long until) {
   while (millis() < until) {
-    digitalWrite(LED_PIN, HIGH);
+
+    update_leds();
 
     #if USB_MIDI
       usbMIDI.read(); // All Channels
     #else
       MIDI.read();
     #endif
-
-    digitalWrite(LED_PIN, LOW);
 
     handle_keys();
     read_pots();
@@ -382,17 +397,20 @@ void wait(unsigned long until) {
 
 
 // Updates the LED colour and brightness to match the stored sequence
-void handle_leds() {
+void update_leds() {
   FastLED.clear();
 
-  for (int l = 0; l < 8; l++) 
-  {
-    if (step_enable[l])
-    {
+  if (!sequencer_is_running) {
+    FastLED.show();
+    return;
+  } 
+
+  for (int l = 0; l < 8; l++) {
+    if (step_enable[l]) {
+
       leds[l] = COLOURS[step_note[l]];
 
-      if (step_velocity[l] < VELOCITY_THRESHOLD) 
-      {
+      if (step_velocity[l] < VELOCITY_THRESHOLD) {
         leds[l].nscale8_video(step_velocity[l]+20);
       }
     }
@@ -428,25 +446,58 @@ void handle_keys() {
                 } else if (k <= STEP_7 && k >= STEP_0) {
                   step_enable[k-STEP_0] = 1-step_enable[k-STEP_0];
                   step_velocity[k-STEP_0] = INITIAL_VELOCITY;
+                } else if (k == DBL_SPEED) {
+                  double_speed = true;
+                } else if (k == OCT_DOWN) {
+                  transpose = -12;
+                } else if (k == OCT_UP) {
+                  transpose = 12;
+                } else if (k == SEQ_RANDOM) {
+                  next_step_is_random = true;
+                } else if (k == BITC_0) {
+                  bitcrusher_button0_pressed = 1;
+                } else if (k == BITC_1) {
+                  bitcrusher_button1_pressed = 1;
+                } else if (k == OSC1_SAW) {
+                  waveform1.begin(WAVEFORM_SAWTOOTH);
+                } else if (k == OSC1_PULSE) {
+                  waveform1.begin(WAVEFORM_SQUARE);
+                } else if (k == MIC_1) {
+                  waveform1.begin(WAVEFORM_SINE);
+                } else if (k == MIC_2) {
+                  waveform2.begin(WAVEFORM_SINE);
+                } else if (k == OSC2_PULSE) {
+                  waveform2.begin(WAVEFORM_SQUARE);
                 }
                 break;
-            /*case HOLD:
-                break;*/
+            case HOLD:
+                break;
             case RELEASED:
                 if (k <= KEYB_9 && k >= KEYB_0) {
-                  // MIDI.sendNoteOff(SCALE[k-KEYB_0], 0, MIDI_CHANNEL);
                   note_off();
+                } else if (k == DBL_SPEED) {
+                  double_speed = false;
+                } else if (k == OCT_DOWN) {
+                  transpose = 0;
+                } else if (k == OCT_UP) {
+                  transpose = 0;
+                } else if (k == SEQ_RANDOM) {
+                  next_step_is_random = false;
+                } else if (k == BITC_0) {
+                  bitcrusher_button0_pressed = 0;
+                } else if (k == BITC_1) {
+                  bitcrusher_button1_pressed = 0;
                 }
                 break;
-            /*case IDLE:
+            case IDLE:
                 break;
-            */
         }
       }
     }
   }
 }
 
-int get_tempo_msec() {
-  return map(analogRead(TEMPO_PIN),30,1023,MIN_TEMPO_MSEC,GATE_LENGTH_MSEC);
+int tempo_interval_msec() {
+  int interval = map(analogRead(TEMPO_POT),40,1023,MIN_TEMPO_MSEC,GATE_LENGTH_MSEC);
+  return interval;
 }
