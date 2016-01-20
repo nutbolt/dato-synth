@@ -59,9 +59,9 @@ const int LED_BRIGHTNESS = 128;
 
 // Pin assignment
 const int DELAY_TIME_POT = A0;
-const int AMP_ENV_POT = A1;
+const int AMP_ENV_POT = A3;
 const int FILTER_RES_POT = A2;
-const int FILTER_ENV_POT = A3;
+const int DELAY_MIX_POT = A1;
 const int FILTER_FREQ_POT = A4;
 const int OSC_DETUNE_POT = A5;
 const int TEMPO_POT = A9; 
@@ -128,10 +128,11 @@ const int MIN_TEMPO_MSEC = 300; // Tempo is actually an interval in ms
 
 // Sequencer settings
 const int NUM_STEPS = 8;
-const int VELOCITY_STEP = 5;
+const int VELOCITY_STEP = 1;
 const int INITIAL_VELOCITY = 100;
 const int VELOCITY_THRESHOLD = 50;
 unsigned char current_step = 0;
+unsigned char target_step = 0;
 unsigned int tempo = 0;
 unsigned long next_step_time = 0;
 unsigned long gate_off_time = 0;
@@ -211,8 +212,8 @@ void setup() {
   envelope2.sustain(1.0);
   envelope2.release(300);
 
-  mixer2.gain(0, 0.5); // output from the bitcrusher
-  mixer2.gain(1, 0.2); // output from the delay
+  mixer2.gain(0, 1.0); // output from the bitcrusher
+  mixer2.gain(1, 0.5); // output from the delay
 
   mixer3.gain(0, 1.0); // delay feed
   mixer3.gain(1, 0.3); // delay feedback
@@ -265,7 +266,7 @@ void loop() {
   // MIDI.sendNoteOff(SCALE[step_note[current_step]], 64, MIDI_CHANNEL);
   note_off();
 
-  // Very crude sequencer off implementation
+  // Very crude sequencer off implementation but works surprisingly well
   while (tempo_interval_msec() >= MIN_TEMPO_MSEC) {
     sequencer_is_running = false;
     handle_input_until(millis() + 20);
@@ -282,15 +283,17 @@ void loop() {
   sync_off_time = next_step_time + SYNC_LENGTH_MSEC;
   gate_off_time = next_step_time + GATE_LENGTH_MSEC;
 
-  // Advance the step number already, so any pressed keys end up in the next step
+  target_step++;
+  if (target_step >= NUM_STEPS) target_step = 0;
+ 
+  handle_input_until(next_step_time);
+
   if (!next_step_is_random) {
     current_step++;
     if (current_step >= NUM_STEPS) current_step = 0;
   } else {
     current_step = random(NUM_STEPS);
   }
- 
-  handle_input_until(next_step_time);
 
 }
 
@@ -309,7 +312,7 @@ void read_pots() {
 
   // Filter envelope. 
   // TODO: Left of center the pot influences the attack. Right of center it influences the release
-  filter_env_pot_value = 512;//analogRead(FILTER_ENV_POT);
+  filter_env_pot_value = 512;//analogRead(DELAY_MIX_POT);
   envelope2.release(amp_env_release * 0.5);
 
   delay1.delay(0, map(analogRead(DELAY_TIME_POT)/16,0,64,50,MAX_DELAY_TIME_MSEC));
@@ -398,6 +401,7 @@ void handle_input_until(unsigned long until) {
 
 // Updates the LED colour and brightness to match the stored sequence
 void update_leds() {
+  // TODO: check if updating the leds is necessary
   FastLED.clear();
 
   if (!sequencer_is_running) {
@@ -436,12 +440,12 @@ void handle_keys() {
             case PRESSED:    
                 if (k <= KEYB_9 && k >= KEYB_0) {
                   if(sequencer_is_running) {
-                    step_note[current_step] = k - KEYB_0;
-                    step_enable[current_step] = 1;
-                    step_velocity[current_step] = INITIAL_VELOCITY; 
+                    step_note[target_step] = k - KEYB_0;
+                    step_enable[target_step] = 1;
+                    step_velocity[target_step] = INITIAL_VELOCITY; 
                   } else {
                     // MIDI.sendNoteOn(SCALE[k-KEYB_0], INITIAL_VELOCITY, MIDI_CHANNEL);
-                    note_on(SCALE[k-KEYB_0], INITIAL_VELOCITY);
+                    note_on(SCALE[k-KEYB_0]+transpose, INITIAL_VELOCITY);
                   }
                 } else if (k <= STEP_7 && k >= STEP_0) {
                   step_enable[k-STEP_0] = 1-step_enable[k-STEP_0];
@@ -498,6 +502,6 @@ void handle_keys() {
 }
 
 int tempo_interval_msec() {
-  int interval = map(analogRead(TEMPO_POT),40,1023,MIN_TEMPO_MSEC,GATE_LENGTH_MSEC);
+  int interval = map(analogRead(TEMPO_POT),100,1023,MIN_TEMPO_MSEC,GATE_LENGTH_MSEC);
   return interval;
 }
