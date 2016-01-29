@@ -4,7 +4,7 @@
 //   1. Switch the delay tap to use and set the delay time to the pot's value
 //   2. Use a mixer to fade between the two taps
 //   X. create a new clocked delay effect
-//
+// - notes sometimes end up in the wrong slot
 #include <Audio.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -162,7 +162,7 @@ static boolean sequencer_is_running = true;
 const int SCALE[] = { 46,49,51,54,61,63,66,68 }; // Low with 2 note split
 const float SAMPLERATE_STEPS[] = { 44100,4435,2489,1109 }; 
 const char DETUNE_OFFSET_SEMITONES[] = { 3,4,5,7,9 };
-const int MAX_DELAY_TIME_MSEC = 200;
+const int MAX_DELAY_TIME_MSEC = 80;
 
 // Variable declarations
 int detune_amount = 0;
@@ -180,7 +180,7 @@ boolean next_step_is_random = false;
 
 void setup() {
 
-  AudioMemory(180); // 260 bytes per block, 2.9ms per block
+  AudioMemory(30); // 260 bytes per block, 2.9ms per block
 
   dc1.amplitude(1.0); // Filter env - this is going to be related to velocity
 
@@ -266,6 +266,9 @@ void loop() {
   // MIDI.sendNoteOff(SCALE[step_note[current_step]], 64, MIDI_CHANNEL);
   note_off();
 
+  target_step = current_step + 1;
+  if (target_step >= NUM_STEPS) target_step = 0;
+
   // Very crude sequencer off implementation but works surprisingly well
   while (tempo_interval_msec() >= MIN_TEMPO_MSEC) {
     sequencer_is_running = false;
@@ -282,9 +285,6 @@ void loop() {
   
   sync_off_time = next_step_time + SYNC_LENGTH_MSEC;
   gate_off_time = next_step_time + GATE_LENGTH_MSEC;
-
-  target_step++;
-  if (target_step >= NUM_STEPS) target_step = 0;
  
   handle_input_until(next_step_time);
 
@@ -404,11 +404,6 @@ void update_leds() {
   // TODO: check if updating the leds is necessary
   FastLED.clear();
 
-  if (!sequencer_is_running) {
-    FastLED.show();
-    return;
-  } 
-
   for (int l = 0; l < 8; l++) {
     if (step_enable[l]) {
 
@@ -419,7 +414,9 @@ void update_leds() {
       }
     }
     else leds[l] = CRGB::Black;
-    leds[current_step] = CRGB::White;
+    if(note_is_playing) {
+      leds[current_step] = CRGB::White;
+    }
   }
 
   FastLED.show();
@@ -445,6 +442,12 @@ void handle_keys() {
                     step_velocity[target_step] = INITIAL_VELOCITY; 
                   } else {
                     // MIDI.sendNoteOn(SCALE[k-KEYB_0], INITIAL_VELOCITY, MIDI_CHANNEL);
+                    current_step++;
+                    if (current_step >= NUM_STEPS) current_step = 0;
+                    target_step=current_step;
+                    step_note[target_step] = k - KEYB_0;
+                    step_enable[target_step] = 1;
+                    step_velocity[target_step] = INITIAL_VELOCITY; 
                     note_on(SCALE[k-KEYB_0]+transpose, INITIAL_VELOCITY);
                   }
                 } else if (k <= STEP_7 && k >= STEP_0) {
