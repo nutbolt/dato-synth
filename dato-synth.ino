@@ -124,7 +124,7 @@ Keypad keypad = Keypad( makeKeymap(keys), row_pins, col_pins, ROWS, COLS );
 const int MIDI_CHANNEL = 1;
 const int GATE_LENGTH_MSEC = 40;
 const int SYNC_LENGTH_MSEC = 1;
-const int MIN_TEMPO_MSEC = 300; // Tempo is actually an interval in ms
+const int MIN_TEMPO_MSEC = 400; // Tempo is actually an interval in ms
 
 // Sequencer settings
 const int NUM_STEPS = 8;
@@ -177,10 +177,11 @@ int transpose = 0;
 char bitcrusher_button0_pressed = 0;
 char bitcrusher_button1_pressed = 0;
 boolean next_step_is_random = false;
+int num_notes_held = 0;
 
 void setup() {
 
-  AudioMemory(30); // 260 bytes per block, 2.9ms per block
+  AudioMemory(180); // 260 bytes per block, 2.9ms per block
 
   dc1.amplitude(1.0); // Filter env - this is going to be related to velocity
 
@@ -246,6 +247,34 @@ void setup() {
 
 void loop() {
 
+  // Should the sequencer advance?
+  while (tempo_interval_msec() == 0) {
+    sequencer_is_running = false;
+    handle_input_until(millis() + 20);
+    tempo = tempo_interval_msec();
+  }
+  sequencer_is_running = true;
+  target_step = current_step + 1;
+  if (target_step >= NUM_STEPS) target_step = 0;
+
+  if(!double_speed) {
+    next_step_time = millis() + tempo_interval_msec();
+  } else {
+    next_step_time = millis() + (tempo_interval_msec()/2);
+  }
+  
+  sync_off_time = next_step_time + SYNC_LENGTH_MSEC;
+  gate_off_time = next_step_time + GATE_LENGTH_MSEC;
+ 
+  handle_input_until(next_step_time);
+
+  if (!next_step_is_random) {
+    current_step++;
+    if (current_step >= NUM_STEPS) current_step = 0;
+  } else {
+    current_step = random(NUM_STEPS);
+  }
+
   // Decrement the velocity of the current note. If minimum velocity is reached leave it there
   if (step_velocity[current_step] <= VELOCITY_STEP) { /*step_velocity[current_step] = 0; step_enable[current_step] = 0;*/ }
   else { step_velocity[current_step] -= VELOCITY_STEP; }
@@ -265,35 +294,6 @@ void loop() {
 
   // MIDI.sendNoteOff(SCALE[step_note[current_step]], 64, MIDI_CHANNEL);
   note_off();
-
-  target_step = current_step + 1;
-  if (target_step >= NUM_STEPS) target_step = 0;
-
-  // Very crude sequencer off implementation but works surprisingly well
-  while (tempo_interval_msec() >= MIN_TEMPO_MSEC) {
-    sequencer_is_running = false;
-    handle_input_until(millis() + 20);
-    tempo = tempo_interval_msec();
-  }
-  sequencer_is_running = true;
-
-  if(!double_speed) {
-    next_step_time = millis() + tempo_interval_msec();
-  } else {
-    next_step_time = millis() + (tempo_interval_msec()/2);
-  }
-  
-  sync_off_time = next_step_time + SYNC_LENGTH_MSEC;
-  gate_off_time = next_step_time + GATE_LENGTH_MSEC;
- 
-  handle_input_until(next_step_time);
-
-  if (!next_step_is_random) {
-    current_step++;
-    if (current_step >= NUM_STEPS) current_step = 0;
-  } else {
-    current_step = random(NUM_STEPS);
-  }
 
 }
 
@@ -448,6 +448,7 @@ void handle_keys() {
                     step_note[target_step] = k - KEYB_0;
                     step_enable[target_step] = 1;
                     step_velocity[target_step] = INITIAL_VELOCITY; 
+                    num_notes_held++;
                     note_on(SCALE[k-KEYB_0]+transpose, INITIAL_VELOCITY);
                   }
                 } else if (k <= STEP_7 && k >= STEP_0) {
@@ -481,7 +482,8 @@ void handle_keys() {
                 break;
             case RELEASED:
                 if (k <= KEYB_9 && k >= KEYB_0) {
-                  note_off();
+                  num_notes_held--;
+                  if(num_notes_held <= 0) note_off();
                 } else if (k == DBL_SPEED) {
                   double_speed = false;
                 } else if (k == OCT_DOWN) {
@@ -505,6 +507,10 @@ void handle_keys() {
 }
 
 int tempo_interval_msec() {
-  int interval = map(analogRead(TEMPO_POT),100,1023,MIN_TEMPO_MSEC,GATE_LENGTH_MSEC);
-  return interval;
+  int potvalue = analogRead(TEMPO_POT);
+  if(potvalue < 100) {
+    return 0;
+  } else {
+    return map(analogRead(TEMPO_POT),100,1023,MIN_TEMPO_MSEC,GATE_LENGTH_MSEC);
+  }
 }
